@@ -1,0 +1,123 @@
+---
+title: "ERP Panorama"
+author: "Dr. Raúl Trujillo Álvarez"
+params:
+  temperature: 20.00
+  elevation: 240
+format: 
+  html:
+    code-fold: true
+    code-tools: true
+    toc: true
+    html-math-method: katex
+    self-contained: true
+---
+
+# Librerias necesarias
+
+```{r}
+#| label: load_libraries
+#| include: true
+#| warning: false
+
+library(tidyverse)
+library(here)
+library(lubridate)
+```
+
+# Lectura de los datos
+
+```{r}
+
+#| label: read_data
+#| include: true
+#| warning: false
+
+erp_panorama_2020 <- read_csv(
+  here::here("data", "erp_panorama_2020.csv"),
+  show_col_types = FALSE
+  ) |> 
+  mutate( 
+    date = mdy_hm(date),
+    hour = hour(date),
+    cat = ifelse( hour < 6 | 22 < hour, "Noche","Día" )
+  ) |> 
+  filter(between(flow, 1.5, 60))
+
+
+```
+
+## Análisis inicial de los caudales
+
+### Histograma de Flujos
+
+```{r}
+#| label: histogram_flow
+#| fig-cap: "Gráfico de caudales en el día y en la noche"
+
+# https://www.tidyverse.org/blog/2020/03/dplyr-1-0-0-summarise/
+# https://r-graph-gallery.com/82-boxplot-on-top-of-histogram.html
+
+mu <- erp_panorama_2020 |>  
+  group_by(cat) |> 
+  summarise(grp.mean = mean(flow))
+
+erp_panorama_2020 |> 
+  ggplot(aes(x = flow, fill = cat, color = cat)) +
+    geom_density(
+      alpha = 0.4,
+      position = "identity"
+    ) +
+  geom_vline(
+    data=mu, 
+    aes(xintercept=grp.mean, color = cat),
+    linetype="dashed"
+  ) + 
+  scale_color_brewer(palette="Dark2")+
+  scale_fill_brewer(palette="Dark2") +
+  ggtitle("Gráfico de caudales en el día y en la noche") +
+  xlab("Caudal (L/s)") + 
+  ylab("Densidad")
+
+```
+
+### Diagrama de de caja (Box-Plots) de los flujos horarios
+
+El diagrama de de caja es una forma rápida y fácil de visualizar datos complejos donde tiene varias muestras.
+
+![](image/typical-box-whisker-plot.png)
+
+```{r}
+#| label: bosplot_flow
+#| fig-cap: "Boxplot de flujos por horas"
+
+erp_panorama_2020 |> 
+    ggplot(aes(x= as.factor(hour), y=flow, color=cat)) + 
+    stat_boxplot(geom = "errorbar") + 
+    geom_boxplot(width = 0.8, outlier.shape = NA) + 
+    scale_color_brewer(palette="Dark2") +
+  ggtitle("Gráfico de caudales discriminados según la hora del día") +
+  xlab("Hora") + 
+  ylab("Caudal (L/s)")
+
+```
+
+## Análisis inicial de presiones a la entrada del sistema
+
+```{r}
+#| label: Points_presiones
+#| fig-cap: "Boxplot de flujos por horas"
+
+# https://www.tidyverse.org/blog/2020/03/dplyr-1-0-0-summarise/
+
+erp_panorama_2020 |> 
+  mutate(flow = round(flow,0)) |> 
+  group_by(flow) |> 
+  summarise(p1 = quantile(p1, c(0.25, 0.50, 0.75)), q = c(0.25, 0.50, 0.75)) |> 
+    ggplot(aes(x = flow, y = p1, colour = factor(q))) + 
+    geom_point()
+  
+
+
+
+```
