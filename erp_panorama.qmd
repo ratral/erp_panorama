@@ -1,28 +1,40 @@
 ---
 title: "ERP Panorama"
-author: "Dr. Raúl Trujillo Álvarez"
+author:
+  - name: Dr. Raúl Trujillo
+  - name: Jaime Bonilla
 params:
-  temperature: 20.00
+  diameter: 100
+  temperature: 20
   elevation: 240
 format: 
   html:
+    theme: flatly
     code-fold: true
     code-tools: true
     toc: true
+    number-sections: true
     html-math-method: katex
     self-contained: true
+engine: knitr
 ---
-
-# Librerias necesarias
 
 ```{r}
 #| label: load_libraries
 #| include: true
 #| warning: false
+#| echo: false
+#| eval: true 
 
 library(tidyverse)
 library(here)
 library(lubridate)
+library(latex2exp)
+library(hyd4gpv)
+library(scales)
+# library(forecast)
+# library(zoo)
+
 ```
 
 # Lectura de los datos
@@ -32,35 +44,70 @@ library(lubridate)
 #| label: read_data
 #| include: true
 #| warning: false
+#| echo: false
+#| eval: true 
 
 erp_panorama_2020 <- read_csv(
   here::here("data", "erp_panorama_2020.csv"),
   show_col_types = FALSE
   ) |> 
   mutate( 
-    date = mdy_hm(date),
-    hour = hour(date),
+    timestamp = mdy_hm(timestamp),
+    date = date(timestamp),
+    hour = hour(timestamp),
     cat = ifelse( hour < 6 | 22 < hour, "Noche","Día" )
+  ) 
+
+n_rows <- count(erp_panorama_2020)
+
+
+erp_panorama_2020 <- erp_panorama_2020 |> 
+  filter(p1 > 0 & p2 >0 & (p1-p2>0)) |> 
+  filter(between(flow, 1.5, 60)) |> 
+  mutate(
+    kv    = round(kv(p1/10, p2/10, flow*3.6, params$temperature),3),
+    sigma = round(sigma_1(p1/10, p2/10, params$elevation, params$temperature),3),
+    zeta  = zeta_vaule(params$diameter, kv),
+    flow  = round(flow,0),
+    delta_sp = p2 - setpoint
   ) |> 
-  filter(between(flow, 1.5, 60))
-
-
+  na.omit() |> 
+   select(timestamp, date, hour, cat, p1, p2, flow, setpoint, delta_sp, kv, sigma, zeta)     
 ```
 
-## Análisis inicial de los caudales
+::: callout-note
 
-### Histograma de Flujos
+## Lecturas removidas
+
+se removieron las siguientes datos:
+
+-   Las presiones negativas
+-   La diferencia de presiones negativas
+-   Flujos menores a $1.5 \; l/s$ y superiores a $60 \; l/s$
+
+- Total número de valores leídos :  `r n_rows[1]`
+- Total número de valores válidos": `r nrow(erp_panorama_2020)` 
+- Porcentaje de valores removidos:  `r round((n_rows-nrow(erp_panorama_2020))/n_rows*100,2)` $\%$.
+
+:::
+
+# Análisis inicial de los datos (visualización exploratoria)
+
+## Histograma de Flujos
 
 ```{r}
 #| label: histogram_flow
+#| echo: fenced
+#| output-location: column
 #| fig-cap: "Gráfico de caudales en el día y en la noche"
+#| warning: false
 
 # https://www.tidyverse.org/blog/2020/03/dplyr-1-0-0-summarise/
 # https://r-graph-gallery.com/82-boxplot-on-top-of-histogram.html
 
 mu <- erp_panorama_2020 |>  
   group_by(cat) |> 
-  summarise(grp.mean = mean(flow))
+  summarise(grp.median = median(flow))
 
 erp_panorama_2020 |> 
   ggplot(aes(x = flow, fill = cat, color = cat)) +
@@ -70,16 +117,32 @@ erp_panorama_2020 |>
     ) +
   geom_vline(
     data=mu, 
-    aes(xintercept=grp.mean, color = cat),
+    aes(xintercept = grp.median, color = cat),
     linetype="dashed"
   ) + 
   scale_color_brewer(palette="Dark2")+
   scale_fill_brewer(palette="Dark2") +
-  ggtitle("Gráfico de caudales en el día y en la noche") +
+  ggtitle("Histograma de los caudales en el día y en la noche") +
   xlab("Caudal (L/s)") + 
-  ylab("Densidad")
+  ylab("Densidad") +
+  scale_x_continuous(
+    limits = c(0, 55),
+    breaks = seq(0, 55, by = 5)
+  )
 
 ```
+
+::: callout-note
+
+## Caudales medios en el día y la noche
+
+- Se especificó como consumo diario los consumos entre las 6:00 y las 22:00 horas
+- El consumo medio (mediana) diario fue de `r mu$grp.median[1]` $l/s$
+- El consumo medio (mediana) nocturno fue de `r mu$grp.median[2]` $l/s$
+
+:::
+
+
 
 ### Diagrama de de caja (Box-Plots) de los flujos horarios
 
@@ -88,36 +151,154 @@ El diagrama de de caja es una forma rápida y fácil de visualizar datos complej
 ![](image/typical-box-whisker-plot.png)
 
 ```{r}
-#| label: bosplot_flow
+#| label: histogram_hour_flow
+#| echo: fenced
+#| output-location: column
 #| fig-cap: "Boxplot de flujos por horas"
+#| warning: false
 
 erp_panorama_2020 |> 
     ggplot(aes(x= as.factor(hour), y=flow, color=cat)) + 
     stat_boxplot(geom = "errorbar") + 
     geom_boxplot(width = 0.8, outlier.shape = NA) + 
     scale_color_brewer(palette="Dark2") +
-  ggtitle("Gráfico de caudales discriminados según la hora del día") +
+  ggtitle("Boxplot de caudales discriminados según la hora del día") +
   xlab("Hora") + 
   ylab("Caudal (L/s)")
 
 ```
 
-## Análisis inicial de presiones a la entrada del sistema
+
+## Histograma de la Consigna de presión (Set-point) verzus presión aguas abajo
 
 ```{r}
-#| label: Points_presiones
-#| fig-cap: "Boxplot de flujos por horas"
-
-# https://www.tidyverse.org/blog/2020/03/dplyr-1-0-0-summarise/
+#| label: histogram_delta_setpoint
+#| echo: fenced
+#| output-location: column
+#| fig-cap: "Histograma de la Consigna de presión verzus presión aguas abajo"
+#| warning: false
 
 erp_panorama_2020 |> 
-  mutate(flow = round(flow,0)) |> 
-  group_by(flow) |> 
-  summarise(p1 = quantile(p1, c(0.25, 0.50, 0.75)), q = c(0.25, 0.50, 0.75)) |> 
-    ggplot(aes(x = flow, y = p1, colour = factor(q))) + 
-    geom_point()
+  ggplot(aes(x = delta_sp)) +
+    geom_histogram(
+      aes(y=..density..), 
+      position="identity", 
+      alpha=0.6,
+      binwidth = 0.1
+    ) +
+    labs(title = TeX(r'(Diferencia con la consigna $\Delta P$)')) +
+    xlab(TeX(r'($\Delta P = (P_2 - SetPoint)$ $(m)$)')) +
+    ylab("Densidad") +
+    scale_x_continuous(
+      limits = c(-20, 20),
+      breaks = seq(-20, 20, by = 5)
+    ) +
+    geom_vline(aes(xintercept = median(delta_sp)), color = "red", size = 1, linetype = "dashed") +
+    geom_vline(aes(xintercept = median(delta_sp) + sd(delta_sp)), color = "#000000", size = 1, linetype = "dashed") +
+    geom_vline(aes(xintercept = median(delta_sp) - sd(delta_sp)), color = "#000000", size = 1, linetype = "dashed")
   
+```
 
 
+## Coeficiente de flujo $K_v$
 
+El valor $K_v$ mide el caudal ($m^3/hour$) a través de una válvula para una caída de presión dada ($1\;bar$). Cuanto mayor sea este valor, mayor será el caudal a través de la válvula a una caída de presión dada. Por lo general, los valores $K_v$ son proporcionados en la descripción en la hoja de datos del productor. La situación particular con una válvula completamente abierta determina el valor $K_{vs}$.
+
+```{r}
+#| label: histogram_flow_coefficient
+#| echo: fenced
+#| output-location: column
+#| fig-cap: "Histograma del Coeficiente de flujo Kv"
+#| warning: false
+#| 
+# https://www.tidyverse.org/blog/2020/03/dplyr-1-0-0-summarise/
+# https://cran.r-project.org/web/packages/latex2exp/vignettes/using-latex2exp.html
+
+erp_panorama_2020 |> 
+  ggplot(aes(x = kv)) +
+    geom_histogram(
+      aes(y=..density..), 
+      position="identity", 
+      alpha=0.6,
+      binwidth = 0.5
+    ) +
+    labs(title = TeX(r'(Coeficiente de flujo $K_v$)')) +
+    xlab(TeX(r'($K_v$ $(m^3/hour)$)')) +
+    ylab("Densidad") +
+    scale_x_continuous(
+      limits = c(0, 200),
+      breaks = seq(0, 200, by = 20)
+    ) +
+    geom_vline(aes(xintercept = median(kv)), color = "red", size = 1, linetype = "dashed" ) 
+
+```
+
+## Historram del factor de Zeta de la válvula
+
+```{r}
+#| label: histogram_zeta_value
+#| echo: fenced
+#| output-location: column
+#| fig-cap: "Historram del factor de Zeta de la válvula"
+#| warning: false
+#| 
+
+erp_panorama_2020 |>
+  ggplot(aes(x = zeta)) +
+    geom_histogram(
+      aes(y=..density..),
+      position="identity",
+      alpha=0.6,
+      binwidth = 10
+    ) +
+    labs(title = TeX(r'(Historram del factor de Zeta $\zeta$ de la válvula)')) +
+    xlab(TeX(r'($\zeta$ Value)')) +
+    ylab("Densidad") +
+    scale_x_continuous(
+      limits = c(0, 2000),
+      breaks = seq(0, 2000, by = 500)
+    ) +
+    geom_vline(aes(xintercept = median(zeta)), color = "red", size = 1, linetype = "dashed" ) 
+```
+
+## Relación caudal versus Presión Aguas Arriba (P1) de la válvula
+
+```{r}
+#| label: flow_vs_p1
+#| echo: fenced
+#| output-location: column
+#| fig-cap: "Boxplot de la relación caudal Presión Aguas Arriba (P1) de la válvula"
+#| warning: false
+#| 
+erp_panorama_2020 |> 
+  ggplot(aes(x= as.factor(flow), y=p1)) + 
+  stat_boxplot(geom = "errorbar") + 
+  geom_boxplot(width = 0.8, outlier.shape = NA) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_color_brewer(palette="Dark2") +
+  ggtitle("Boxplot de la relación caudal versus Presión Aguas Arriba (P1)") +
+  xlab("Caudal (L/s)") + 
+  ylab("Presión Aguas Arriba (m)")
+
+```
+
+## Consumo medio diario
+
+```{r}
+
+# https://www.youtube.com/watch?v=UBDevJvH1m4
+# https://tbradley1013.github.io/2018/10/01/calculating-quantiles-for-groups-with-dplyr-summarize-and-purrr-partial/
+
+daily.df1 <- erp_panorama_2020 |> 
+  group_by(date) |> 
+  summarise(
+    q25 = quantile(flow, probs = 0.25, na.rm = TRUE),
+    median = median(flow, na.rm = TRUE),
+    mean = mean(flow, na.rm = TRUE),
+    q75 = quantile(flow, probs = 0.75, na.rm = TRUE),
+    sd = sd(flow, na.rm = TRUE),
+    n = n(),
+    missing = round(((24*60/5) - n)/(24*60/5)*100,2)
+  ) |> 
+  filter(missing <= 75)
 ```
